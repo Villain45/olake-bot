@@ -2,8 +2,8 @@ name: Refresh OLake index
 
 on:
   schedule:
-    # 03:17 UTC = 08:47 IST. Automatic runs require ENABLE_SCHEDULED_REFRESH=true.
-    - cron: "17 3 * * *"
+    # Every three hours at minute 17 UTC. Requires ENABLE_SCHEDULED_REFRESH=true.
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       confirm_no_other_indexer:

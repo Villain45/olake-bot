@@ -16,10 +16,13 @@ Contract: `POST /ask {"question": "..."} -> {"answer": "...", "sources": ["<url>
              -> validated LLM JSON -> passage-linked answer or one bounded repair
              -> {answer, sources}
 
-CPU models are baked into the Docker image. Qdrant stores dense and BM25 vectors;
-FlashRank reranks retrieved passages. Positive answers require valid passage citations,
-and insufficient evidence produces a refusal. Requests have caching, rate limiting and
-bounded concurrency. Pasted code and configuration retain indentation and letter case.
+Dense embeddings use `BAAI/bge-small-en-v1.5` (384 dimensions), sparse embeddings use
+`Qdrant/bm25`, and FlashRank reranks passages with `ms-marco-MiniLM-L-12-v2`.
+These models run on the API/indexing host's CPU and are baked into the Docker image;
+Qdrant Cloud stores and searches the vectors. Answer generation runs through OpenRouter.
+Positive answers require valid passage citations, and insufficient evidence produces
+a refusal. Requests have caching, rate limiting and bounded concurrency. Pasted code
+and configuration retain indentation and letter case.
 
 Retrieval uses a compact query of at most 96 reranker tokens when a question contains a
 large configuration dump; the answer model still receives the original question. Setup
@@ -36,24 +39,36 @@ checks for unknown IDs, invented URLs and unsupported configuration keys or flag
 These checks catch specific failures; they do not prove every factual claim is correct.
 
 `RETRIEVAL_RECOVERY_ENABLED` and `ANSWER_RECOVERY_ENABLED` default to `true`;
-`RECOVERY_MIN_REMAINING_S` defaults to `8`. `MIN_RERANK_SCORE` remains `0.25` pending
-reviewed calibration. Restart the API to load runtime changes; no index command is needed.
+`RECOVERY_MIN_REMAINING_S` defaults to `8`. `MIN_RERANK_SCORE` defaults to `0.25` and
+can be calibrated with the evaluation tools below. Restart the API to load runtime
+changes. Retrieval thresholds and answer-model changes use the existing index;
+changing the embedding models or indexed content requires rebuilding it.
 
 ## Setup
 
+Use Python 3.11 or newer, `uv`, and Git. Docker and scheduled refresh use Python 3.12.
+Run the commands below from the repository root.
+
     uv sync --frozen
 
-Copy `.env.example` to `.env` and fill in the keys (`Copy-Item .env.example .env` in
-PowerShell, or `cp .env.example .env` on Linux/macOS). Keep `.env` local.
+For a new checkout, copy `.env.example` to `.env` and fill in the keys
+(`Copy-Item .env.example .env` in PowerShell, or `cp .env.example .env` on Linux/macOS).
+Keep an existing configured `.env` when updating the repository, and keep it local.
 
 The template contains the three connection values needed for setup. The app loads
-`.env`; optional settings and defaults are defined in `app/config.py`. To override a
-setting, add its uppercase name to `.env`, for example `TOP_K=8`.
+`.env`; optional settings and defaults are defined in [app/config.py](app/config.py).
+To override a setting, add its uppercase name to `.env`, for example `TOP_K=8`.
 List values use JSON arrays. LLM routing is restricted to the three models below;
 legacy `LLM_MODEL` and `LLM_FALLBACK_MODELS` overrides are normalized to this order.
 Process environment variables take precedence over `.env`.
 
-Run ingestion when ready to fetch and publish an index:
+Set `QDRANT_URL` to your Qdrant Cloud HTTPS endpoint and `QDRANT_API_KEY` to its
+database API key. The API and indexer share this connection; both values are required,
+and there is no implicit local Qdrant fallback. `COLLECTION` defaults to `olake_docs`.
+`OPENROUTER_API_KEY` is needed for answers, but is not used for crawling or indexing.
+
+Run ingestion when ready to fetch and publish an index. If the configured Cloud
+collection already has a usable index, skip these commands to use it:
 
     uv run python -m ingest.crawl docs
     uv run python -m ingest.crawl repos
@@ -63,11 +78,13 @@ Start the API after an index exists:
 
     uv run uvicorn app.main:app --reload --port 8080
 
-Set `QDRANT_URL` to your Qdrant Cloud HTTPS endpoint and `QDRANT_API_KEY` to its
-database API key. The API and indexer share these settings. Supply both as
-environment variables when deploying. `COLLECTION` defaults to `olake_docs`.
-`OPENROUTER_API_KEY` is needed for answers. The supplied key permits exactly these
-models, tried in this priority order:
+CPU models are downloaded into `.model_cache/` on first local use. This startup work
+is separate from request latency; the Docker image downloads its default models at
+build time.
+
+## Answer models and configuration
+
+The application restricts OpenRouter routing to these models in this priority order:
 
 1. `google/gemini-2.5-flash-lite` (primary)
 2. `z-ai/glm-4.7-flash`
@@ -78,18 +95,69 @@ The application enforces this order even if `.env` still contains the previous
 GLM-first settings. Restart a running API to load the updated order.
 `GET /models` returns `{"models": ["...", "...", "..."], "default": "google/gemini-2.5-flash-lite"}`.
 The API moves to the next allowed model for model-specific errors (including 403),
-timeouts and invalid output. JSON-mode compatibility is handled per model. A grammar
-instruction improves the prose while preserving commands, identifiers and facts.
+timeouts and invalid output. JSON-mode compatibility is handled per model. Grammar
+is handled during answer generation: the prompt asks for clear prose while preserving
+commands, identifiers and facts.
 Invalid output receives controlled correction feedback on the next attempt, and
 truncated output gets a bounded increase in its output-token allowance.
+Authentication and billing errors stop the attempt instead of trying another model.
 Changing the answer model does not change embeddings, Qdrant collections or the built
 index; no reindexing is needed.
+
+Common optional overrides are listed below. Durations are in seconds, and concurrency
+and answer caches apply separately to each API process.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `CANDIDATES` | `30` | Hybrid-search candidates to rerank. |
+| `TOP_K` | `6` | Maximum passages supplied as answer context; must not exceed `CANDIDATES`. |
+| `MIN_RERANK_SCORE` | `0.25` | Minimum passage score accepted as evidence. |
+| `REQUEST_TIMEOUT_S` | `55` | Overall `/ask` deadline. |
+| `LLM_TIMEOUT_S` | `25` | Ceiling for a model attempt; remaining time is shared across fallbacks, so an attempt can time out earlier. |
+| `LLM_MAX_OUTPUT_TOKENS` | `1200` | Initial answer token limit, with a bounded increase after truncation. |
+| `RETRIEVAL_CONCURRENCY` | `2` | Maximum concurrent retrieval/reranking workers. |
+| `LLM_CONCURRENCY` | `8` | Maximum concurrent answer-generation operations. |
+| `WEB_FALLBACK_ENABLED` | `true` | Allow fallback search on the configured trusted domains. |
+| `WEB_TIMEOUT_S` | `4` | Deadline for fallback web search and page fetching; reranking also uses the request budget. |
+| `CACHE_TTL_S` / `REFUSAL_CACHE_TTL_S` | `3600` / `60` | Cache lifetimes for sourced answers and responses without sources. |
+| `INDEX_REFRESH_S` | `5` | How often the API refreshes its view of the published collection alias. |
+| `INDEX_BATCH_SIZE` | `32` | Chunk batch size for embedding and upload during indexing. |
+
+`RETRIEVAL_RECOVERY_ENABLED` and `ANSWER_RECOVERY_ENABLED` control the recovery paths
+described above. Set `ALLOWED_ORIGINS` to a JSON array of browser origins when deploying
+a frontend; its default is `["*"]`. All optional settings remain in `app/config.py`.
+
+## API
 
 To inspect the completed index and try answers, start the API above and visit
 `http://localhost:8080/docs`. Check `GET /models` and `GET /readyz`, then try `POST /ask`
 with `{"question": "What is OLake Fusion and what does it do?"}`. Readiness reports the
-active index version and chunk count. It performs read-only queries, not an LLM call.
+active index version and chunk count. It performs read-only queries and checks that an
+OpenRouter key is configured, without calling the LLM or verifying the key's permissions.
 Inspect the returned answer and source links before running the evaluation commands.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `POST /ask` | Accepts `question` and optional `product`; returns `answer` and `sources`. |
+| `GET /models` | Returns the permitted model order and primary model. |
+| `GET /healthz` | Liveness status and configured primary model; does not check remote services. |
+| `GET /readyz` | Checks configuration, index availability, vector compatibility and nonempty data; returns 503 if unavailable. |
+| `GET /version` | Returns Render's commit and instance identifiers, or `null` values outside Render. |
+| `GET /docs` | Interactive OpenAPI documentation. |
+
+Questions must contain 1–2000 characters after surrounding whitespace is trimmed;
+`MAX_QUESTION_CHARS` can lower the upper limit. The optional `product` filter scopes
+indexed searches to `"ingestion"` or `"fusion"`, for example:
+
+```json
+{"question": "What maintenance does OLake Fusion automate?", "product": "fusion"}
+```
+
+The default rate limit is `20/minute` per client IP. Invalid requests return 422,
+rate-limited requests 429, service failures 503, and request timeouts 504. A refusal or
+clarification is a successful 200 response with an empty `sources` array. Identical
+requests share in-flight generation and then use an in-memory cache keyed by index,
+model order, product and question; caches are cleared on API restart.
 
 ## Rebuilding safely
 
@@ -105,10 +173,11 @@ embedding cache reuse, speed and ETA. Warnings and retry failures appear on stde
 fatal errors include a full traceback and return a nonzero exit code. These console
 updates apply to newly started builds; an already running process keeps its loaded code.
 
-If an older index build is already running while this code is updated, let it finish.
-That process uses the implementation it loaded when it started. The next build uses the
-new chunking and safe publication flow. Avoid overlapping index builds. Improvements to
-chunking, metadata, duplicate handling and indexed file types take effect after rebuilding.
+Avoid overlapping index builds. A local file lock rejects simultaneous publication
+using the same embedding cache, but does not coordinate separate machines or cache paths.
+Let a running build finish before starting another. Chunking, metadata, duplicate
+handling and indexed file-type changes take effect after rebuilding; restarting the
+API alone does not apply them to stored data.
 
 The raw documentation and repository snapshots live under `data/`. Refresh them with
 the crawl commands before rebuilding when newer source content is needed. A deployment
@@ -119,11 +188,14 @@ does not automatically crawl or rebuild on startup.
 The `Refresh OLake index` workflow in `.github/workflows/refresh-index.yml` fetches
 documentation, updates the five source repositories, then runs the existing indexer.
 Its `ingest.refresh_index` wrapper performs retention after successful publication.
-It is scheduled daily at **03:17 UTC / 08:47 IST**. GitHub may delay scheduled runs;
-the workflow must be on the repository's default branch.
+It is scheduled every **three hours**, using `17 */3 * * *`: **00:17, 03:17,
+06:17, 09:17, 12:17, 15:17, 18:17 and 21:17 UTC** (02:47, 05:47, 08:47, 11:47,
+14:47, 17:47, 20:47 and 23:47 IST). GitHub may delay scheduled runs; the workflow
+must be on the repository's default branch.
 
-Automatic refresh is **disabled by default** so an existing local index build can
-finish. This workflow does not start on a push and does not modify the indexer.
+Automatic refresh runs only when `ENABLE_SCHEDULED_REFRESH` is set to `true`; an unset
+variable leaves it **disabled**. This workflow does not start on a push and does not
+modify the indexer.
 GitHub workflow concurrency prevents its own builds from overlapping, but cannot
 detect a build running on your laptop or another service. Finish any such build
 before enabling automation or starting a manual refresh.
@@ -134,8 +206,9 @@ In GitHub, open **Settings > Secrets and variables > Actions** and configure:
   values from your local `.env`. The indexer does not need an OpenRouter key.
 - Repository variable `QDRANT_COLLECTION`, matching your API's `COLLECTION`
   (default `olake_docs`).
-- After the current build finishes and this workflow is pushed to the default branch,
-  set repository variable `ENABLE_SCHEDULED_REFRESH` to `true` to enable daily runs.
+- After all other index builds finish and this workflow is on the default branch,
+  set repository variable `ENABLE_SCHEDULED_REFRESH` to `true` to enable runs every
+  three hours.
   Set it to `false` to pause future automatic runs; it does not stop an active run.
 
 To run once after local indexing finishes, open **Actions > Refresh OLake index >
@@ -150,8 +223,9 @@ cache eviction or a forced termination can require recomputing embeddings. The f
 GitHub run has its own empty cache and does not reuse your laptop's cache. Keep one
 scheduled publisher per Qdrant collection.
 
-After a successful build, the wrapper points `{COLLECTION}_previous` at the formerly
-current index, keeping one rollback alongside `{COLLECTION}_current`. It deletes only
+After a successful build that publishes a different index, the wrapper points
+`{COLLECTION}_previous` at the formerly current index, keeping one rollback alongside
+`{COLLECTION}_current` when an earlier index exists. It deletes only
 the displaced previous index, after checking that no alias still references it. Failed
 builds do not run retention; an unchanged published index keeps its existing rollback.
 Deletion failures leave the new index available and are retried from a small retention
@@ -164,9 +238,10 @@ targets of other aliases remain untouched. An existing legacy `COLLECTION` can b
 the rollback when it was serving traffic before a successful refresh; it is eligible
 for deletion only after a later refresh replaces it in the rollback slot.
 
-Direct `python -m ingest.build_index` runs, including a build already in progress,
-remain unchanged and do not run cleanup. To build with retention manually after all
-other builders finish, use `uv run python -m ingest.refresh_index`. For a manual
+Direct `uv run python -m ingest.build_index` runs do not run cleanup. To rebuild the
+saved source snapshots with retention after all other builders finish, use
+`uv run python -m ingest.refresh_index`. This wrapper does not crawl; run the crawl
+commands first when fresher source content is needed. For a manual
 rollback, atomically swap the targets of the `_current` and `_previous` aliases in
 Qdrant while refresh jobs are paused; both collections remain available.
 
@@ -180,7 +255,7 @@ The 48-case evaluation covers ingestion, configuration, Fusion, refusals and inj
 attempts. It runs only when explicitly invoked against an already running API, and can
 consume OpenRouter credits:
 
-    uv run python eval/run_eval.py http://localhost:8080 --limit 5 --output eval/results.json
+    uv run python eval/run_eval.py http://localhost:8080 --limit 5 --output eval/results-smoke.json
     uv run python eval/run_eval.py http://localhost:8080 --output eval/results.json
 
 The runner exits nonzero for HTTP/response errors or failed measured quality checks.
@@ -220,6 +295,27 @@ Review failing cases before changing `TOP_K`, `CANDIDATES` or `MIN_RERANK_SCORE`
 No production latency, answer-quality or cost benchmark is claimed until the live suite
 has been run and its answers reviewed.
 
+### Measured latency sample
+
+The local five-question Gemini-first smoke run used real Qdrant Cloud reads and
+OpenRouter generation. All five requests were cache misses and were answered by
+`google/gemini-2.5-flash-lite` without a fallback or HTTP error.
+
+| Saved run | Requests | Mean | p50 | p95 |
+| --- | --- | --- | --- | --- |
+| Earlier report | 5 | 20.84 s | 20.76 s | 21.92 s |
+| Gemini-first smoke run | 5 | 5.69 s | 4.82 s | 7.44 s |
+
+The newer run passed the five expected-source and keyword checks. These are proxy
+checks, not a factual-accuracy score. The earlier report predates other pipeline
+changes and did not record cache state, so this is not a controlled model-only
+comparison. Request timings exclude application startup and model downloads, and
+five questions do not establish production latency or full-suite quality.
+
+Local reports are saved as `eval/results.json` and `eval/results-gemini.json`; generated
+`eval/results*.json` files are ignored by Git and are not included in a fresh clone.
+Use the evaluation commands above to measure your own deployment.
+
 ## Deploy
 
     docker build -t olake-ask .
@@ -227,13 +323,18 @@ has been run and its answers reviewed.
 
 The container defaults to port 7860; set `PORT` if your host requires another port.
 Dependencies are installed from `uv.lock`, and models are downloaded during image build.
+For a Render Docker web service, set `OPENROUTER_API_KEY`, `QDRANT_URL` and
+`QDRANT_API_KEY` in the service environment. Set `COLLECTION` if it differs from
+`olake_docs`, and keep it aligned with the refresh workflow's `QDRANT_COLLECTION`.
+The container reads Render's `PORT`; `/version` identifies its commit and instance.
 The app runs as a non-root user with write access to `/models`. Model downloads require
 network access at build time. The API image includes `app/`; there is no widget source in
 this repository. A separately built widget can be mounted at `/app/widget/dist` to use
 the optional `/widget` static route.
 
 `GET /healthz` is a liveness check. Use `GET /readyz` for routing readiness: it returns
-503 when the configured index is unavailable, empty or incompatible. Readiness does not
-make a billable LLM request. Keep the API close to Qdrant and configure a persistent
-service if cold-start latency matters. Schedule crawling and rebuilding separately if
-automatic freshness is required.
+503 when the OpenRouter key is missing or the configured index is unavailable, empty
+or incompatible. Readiness does not make a billable LLM request. Keep the API close
+to Qdrant and configure a persistent service if cold-start latency matters. The API
+image contains no ingestion scripts and does not rebuild on startup; run ingestion
+from a repository checkout or the scheduled refresh workflow.
