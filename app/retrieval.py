@@ -5,16 +5,17 @@ import re
 import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from urllib.parse import unquote, urlsplit
 
 from fastembed import SparseTextEmbedding, TextEmbedding
-from flashrank import Ranker, RerankRequest
 from qdrant_client import models as m
 from tokenizers import Tokenizer
 
 from .config import Settings
+from .inference import CpuRanker as Ranker, rerank_batched
 from .models import Chunk
 from .qdrant import make_client
 
@@ -29,6 +30,16 @@ _CONFIG_QUESTION = re.compile(
 _ERROR = re.compile(
     r"\b(error|exception|fatal|permission denied|does not exist|cannot|could not|invalid|failed|sqlstate)\b", re.I,
 )
+
+
+@contextmanager
+def _stage(name: str):
+    started = time.perf_counter()
+    log.info("retrieval stage=%s started", name)
+    try:
+        yield
+    finally:
+        log.info("retrieval stage=%s seconds=%.3f", name, time.perf_counter() - started)
 
 
 def _token_count(text: str, tokenizer: Tokenizer | None) -> int:
@@ -167,9 +178,11 @@ class Retriever:
     def __init__(self, s: Settings):
         self.s = s
         self.qdrant = make_client(s)
-        self.dense = TextEmbedding(s.embed_model, cache_dir=s.model_cache_dir)
-        self.sparse = SparseTextEmbedding(s.sparse_model, cache_dir=s.model_cache_dir)
-        self.ranker = Ranker(model_name=s.rerank_model, cache_dir=s.model_cache_dir)
+        self.dense = TextEmbedding(s.embed_model, cache_dir=s.model_cache_dir, threads=s.inference_threads)
+        self.sparse = SparseTextEmbedding(s.sparse_model, cache_dir=s.model_cache_dir, threads=s.inference_threads)
+        self.ranker = Ranker(model_name=s.rerank_model, cache_dir=s.model_cache_dir, threads=s.inference_threads)
+        log.info("CPU inference threads=%d rerank_batch_size=%d retrieval_concurrency=%d",
+                 s.inference_threads, s.rerank_batch_size, s.retrieval_concurrency)
         tokenizer = getattr(self.ranker, "tokenizer", None)
         self._query_tokenizer = Tokenizer.from_str(tokenizer.to_str()) if tokenizer is not None else None
         if self._query_tokenizer is not None:
@@ -251,7 +264,9 @@ class Retriever:
         return selected
 
     async def _run_worker(self, function, *args):
+        queued = time.perf_counter()
         await self._sem.acquire()
+        log.info("retrieval stage=queue seconds=%.3f", time.perf_counter() - queued)
         task = asyncio.create_task(asyncio.to_thread(function, *args))
         self._workers.add(task)
 
@@ -273,24 +288,27 @@ class Retriever:
         query = retrieval_query(question, tokenizer, recovery=recovery)
         ranking_query = retrieval_query(question, tokenizer)
         candidates = min(100, s.candidates * 2) if recovery else s.candidates
-        dense_vec = next(iter(self.dense.query_embed(query))).tolist()
-        sp = next(iter(self.sparse.query_embed(query)))
+        with _stage("embedding_dense"):
+            dense_vec = next(iter(self.dense.query_embed(query))).tolist()
+        with _stage("embedding_sparse"):
+            sp = next(iter(self.sparse.query_embed(query)))
         sparse_vec = m.SparseVector(indices=sp.indices.tolist(), values=sp.values.tolist())
 
         flt = None
         if product:
             flt = m.Filter(must=[m.FieldCondition(key="product", match=m.MatchValue(value=product))])
 
-        res = self.qdrant.query_points(
-            self._request_index.get() or self.index_version(),
-            prefetch=[
-                m.Prefetch(query=dense_vec, using="dense", limit=candidates, filter=flt),
-                m.Prefetch(query=sparse_vec, using="bm25", limit=candidates, filter=flt),
-            ],
-            query=m.FusionQuery(fusion=m.Fusion.RRF),
-            limit=candidates,
-            with_payload=True,
-        ).points
+        with _stage("qdrant"):
+            res = self.qdrant.query_points(
+                self._request_index.get() or self.index_version(),
+                prefetch=[
+                    m.Prefetch(query=dense_vec, using="dense", limit=candidates, filter=flt),
+                    m.Prefetch(query=sparse_vec, using="bm25", limit=candidates, filter=flt),
+                ],
+                query=m.FusionQuery(fusion=m.Fusion.RRF),
+                limit=candidates,
+                with_payload=True,
+            ).points
         res = [point for point in res if not _is_instruction(point.payload.get("url", ""))]
         if not res:
             return []
@@ -299,7 +317,8 @@ class Retriever:
             {"id": i, "text": f"{p.payload['breadcrumb']}\n{p.payload['text']}"}
             for i, p in enumerate(res)
         ]
-        ranked = self.ranker.rerank(RerankRequest(query=ranking_query, passages=passages))
+        with _stage("rerank_local"):
+            ranked = rerank_batched(self.ranker, ranking_query, passages, self.s.rerank_batch_size)
 
         chunks: list[Chunk] = []
         for r in ranked:
@@ -333,7 +352,8 @@ class Retriever:
             for i, chunk in enumerate(chunks)
         ]
         query = retrieval_query(question, getattr(self, "_query_tokenizer", None))
-        ranked = self.ranker.rerank(RerankRequest(query=query, passages=passages))
+        with _stage("rerank_external"):
+            ranked = rerank_batched(self.ranker, query, passages, self.s.rerank_batch_size)
         return self._diverse(
             [replace(chunks[item["id"]], score=float(item["score"])) for item in ranked],
             self.s.top_k,

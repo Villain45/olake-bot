@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     sparse_model: str = "Qdrant/bm25"
     rerank_model: str = "ms-marco-MiniLM-L-12-v2"
     model_cache_dir: str = "./.model_cache"
+    inference_threads: int = Field(default=1, gt=0)
+    rerank_batch_size: int = Field(default=2, gt=0)
 
     # Retrieval
     candidates: int = Field(default=30, gt=0)

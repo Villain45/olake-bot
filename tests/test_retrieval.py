@@ -188,10 +188,15 @@ class RetrievalTests(unittest.TestCase):
             SimpleNamespace(payload={**shared, "text": "New configuration prerequisites."}),
             SimpleNamespace(payload={**shared, "text": "Unrelated low scoring details."}),
         ]
-        retriever.ranker.rerank.return_value = [{"id": 0, "score": 0.9}, {"id": 1, "score": 0.7}, {"id": 2, "score": 0.1}]
+        scores = {0: 0.9, 1: 0.7, 2: 0.1}
+        retriever.ranker.rerank.side_effect = lambda request: sorted(
+            [{**passage, "score": scores[passage["id"]]} for passage in request.passages],
+            key=lambda passage: passage["score"], reverse=True,
+        )
         result = retriever._retrieve_sync("PostgreSQL configuration", recovery=True)
         self.assertEqual([item.text for item in result], ["New configuration prerequisites."])
         self.assertEqual(result[0].score, 0.7)
+        self.assertEqual([len(call.args[0].passages) for call in retriever.ranker.rerank.call_args_list], [2, 1])
 
     def test_readiness_rejects_empty_or_mismatched_index(self):
         retriever = self.make_retriever()
@@ -221,6 +226,20 @@ class RetrievalTests(unittest.TestCase):
         self.assertEqual([item.text for item in ranked], ["two", "one"])
         self.assertEqual(ranked[0].score, 0.9)
         self.assertEqual(original[1].score, 0)
+
+    def test_external_rerank_merges_all_batches_with_original_source_ids(self):
+        retriever = self.make_retriever()
+        retriever.ranker = Mock()
+        scores = {0: 0.3, 1: 0.8, 2: 0.5, 3: 0.9, 4: 0.7}
+        retriever.ranker.rerank.side_effect = lambda request: sorted(
+            [{**passage, "score": scores[passage["id"]]} for passage in request.passages],
+            key=lambda passage: passage["score"], reverse=True,
+        )
+        original = [chunk(f"passage {i}", f"https://source{i}.test/", 0) for i in scores]
+        ranked = retriever._rerank_external_sync("question", original)
+        self.assertEqual([item.url for item in ranked], [original[i].url for i in (3, 1, 4, 2, 0)])
+        self.assertEqual([len(call.args[0].passages) for call in retriever.ranker.rerank.call_args_list], [2, 2, 1])
+        self.assertTrue(all(item.score == 0 for item in original))
 
 
 class RetrievalQueryTests(unittest.TestCase):

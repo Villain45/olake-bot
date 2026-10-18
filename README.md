@@ -80,6 +80,25 @@ Invoke-RestMethod -Uri "http://localhost:8080/ask" `
 The response contains **`answer`** and **`sources`**. If a setup choice is missing,
 the assistant can ask a clarification; if the evidence is insufficient, it declines to guess.
 
+## Render CPU tuning
+
+The API defaults to `INFERENCE_THREADS=1` and `RERANK_BATCH_SIZE=2` to limit CPU
+thread contention and peak reranking memory. These optional environment variables
+apply after restarting or redeploying the API. The embedding and reranking models,
+token limits and Qdrant index stay the same; no reindexing is needed.
+Quantized reranker scores can vary with batch size; review returned evidence when
+changing this setting.
+
+For a small Render instance, keep `WEB_CONCURRENCY=1` and
+`RETRIEVAL_CONCURRENCY=1`. The reduced-load deployment also uses `CANDIDATES=8`,
+`TOP_K=6` and `RETRIEVAL_RECOVERY_ENABLED=false`; reducing candidates and disabling
+recovery can reduce evidence coverage. No particular free-tier latency is guaranteed.
+
+Logs report `retrieval stage=queue`, `embedding_dense`, `embedding_sparse`,
+`qdrant`, `rerank_local` and `rerank_external` durations in seconds. Compare these
+with `LLM attempt=... elapsed_s=...` and `ask seconds=...` for an uncached request.
+An exact repeated question can return `X-Cache: HIT` and skip inference.
+
 ## API at a glance
 
 | Route | What you get |
