@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+.venv
+.model_cache
+.idea
+.pytest_cache
+__pycache__
+*.pyc
+data
+eval
+tests
+.git
+widget/node_modules

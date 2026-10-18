@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.model_cache/
+data/raw/
+data/repos/
+data/embedding_cache.sqlite3*
+data/crawl_manifest.json
+eval/results*.json
+widget/node_modules/
+widget/dist/
+.idea/

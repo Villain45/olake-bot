@@ -1,0 +1,102 @@
+name: Refresh OLake index
+
+on:
+  schedule:
+    # 03:17 UTC = 08:47 IST. Automatic runs require ENABLE_SCHEDULED_REFRESH=true.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      confirm_no_other_indexer:
+        description: "I confirm no local or other index build is running for this collection"
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+# Serialize workflow builds without cancelling one that is already publishing.
+# This does not lock indexers running on your laptop or another service.
+concurrency:
+  group: olake-index-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      ((github.event_name == 'schedule' && vars.ENABLE_SCHEDULED_REFRESH == 'true') ||
+       (github.event_name == 'workflow_dispatch' && inputs.confirm_no_other_indexer))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PYTHONUNBUFFERED: "1"
+      MODEL_CACHE_DIR: ./.model_cache
+      INDEX_CACHE_PATH: ./data/embedding_cache.sqlite3
+      COLLECTION: ${{ vars.QDRANT_COLLECTION || 'olake_docs' }}
+
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Check Qdrant secrets
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+        run: |
+          if [[ -z "$QDRANT_URL" || -z "$QDRANT_API_KEY" ]]; then
+            echo "::error::Set QDRANT_URL and QDRANT_API_KEY in repository Actions secrets."
+            exit 1
+          fi
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.11.7"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Restore models, sources, and saved embeddings
+        id: state
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            .model_cache
+            data/raw
+            data/repos
+            data/embedding_cache.sqlite3
+            data/embedding_cache.sqlite3.retention.json
+          key: olake-refresh-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            olake-refresh-v1-${{ runner.os }}-
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Fetch documentation
+        run: uv run --frozen python -m ingest.crawl docs
+
+      - name: Refresh repository sources
+        run: uv run --frozen python -m ingest.crawl repos
+
+      - name: Build, publish, and retain one rollback index
+        env:
+          QDRANT_URL: ${{ secrets.QDRANT_URL }}
+          QDRANT_API_KEY: ${{ secrets.QDRANT_API_KEY }}
+        run: uv run --frozen python -m ingest.refresh_index
+
+      # Save completed embedding batches even when a later crawl/build step fails.
+      - name: Save refresh state
+        if: ${{ always() && steps.state.outcome == 'success' }}
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            .model_cache
+            data/raw
+            data/repos
+            data/embedding_cache.sqlite3
+            data/embedding_cache.sqlite3.retention.json
+          key: ${{ steps.state.outputs.cache-primary-key }}
