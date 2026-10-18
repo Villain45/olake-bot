@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">Ask OLake</title>
+  <desc id="description">From documentation to answers. Ingestion, CDC, and Iceberg maintenance, with links to the sources.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1200" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0A1222"/>
+      <stop offset="1" stop-color="#122A3C"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="46" y1="0" x2="1154" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#43E0C0"/>
+      <stop offset="1" stop-color="#7EA8FF"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(1000 80) scale(420 330)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2B6480" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#2B6480" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" stroke="#B5D8E8" stroke-opacity=".035"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="300" rx="20" fill="url(#background)"/>
+  <rect width="1200" height="300" rx="20" fill="url(#glow)"/>
+  <rect width="1200" height="300" rx="20" fill="url(#grid)"/>
+  <path d="M46 1H1154" stroke="url(#accent)" stroke-width="2"/>
+  <g font-family="Inter, Segoe UI, Helvetica, Arial, sans-serif">
+    <circle cx="53" cy="56" r="4" fill="#43E0C0"/>
+    <text x="68" y="60" fill="#9DB9CE" font-size="11" font-weight="600" letter-spacing="2.4">OLAKE DOCUMENTATION ASSISTANT</text>
+    <text x="46" y="139" fill="#F4F8FC" font-size="64" font-weight="700" letter-spacing="-2">Ask <tspan fill="#43E0C0">OLake</tspan></text>
+    <text x="48" y="182" fill="#D3DFEB" font-size="23" font-weight="400">From documentation to answers.</text>
+    <text x="48" y="232" fill="#8FAABE" font-size="14">Ingestion</text>
+    <circle cx="122" cy="227" r="2" fill="#43E0C0"/>
+    <text x="136" y="232" fill="#8FAABE" font-size="14">CDC</text>
+    <circle cx="181" cy="227" r="2" fill="#43E0C0"/>
+    <text x="195" y="232" fill="#8FAABE" font-size="14">Iceberg maintenance</text>
+    <path d="M653 58V242" stroke="#365366" stroke-opacity=".6"/>
+    <rect x="700" y="40" width="450" height="61" rx="12" fill="#162A3E" stroke="#355267"/>
+    <path d="M724 61H739V72H731L727 76V72H724V61Z" stroke="#7EA8FF" stroke-width="1.5" stroke-linejoin="round"/>
+    <text x="754" y="77" fill="#DFEAF5" font-size="17">How do I configure Postgres CDC?</text>
+    <path d="M925 102V123M921 119L925 123L929 119" stroke="#5E819A" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="700" y="133" width="450" height="127" rx="12" fill="#102938" stroke="#3A7B79" stroke-opacity=".8"/>
+    <rect x="722" y="151" width="112" height="22" rx="6" fill="#173C40"/>
+    <circle cx="734" cy="162" r="3" fill="#43E0C0"/>
+    <text x="744" y="166" fill="#7FE8CF" font-size="10" font-weight="600" letter-spacing="1">FROM THE DOCS</text>
+    <text x="722" y="202" fill="#F0F7FC" font-size="19" font-weight="600">Relevant evidence. A clear answer.</text>
+    <path d="M725 223H736V236H725V223ZM728 227H733M728 231H733" stroke="#7FA4BE" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="746" y="234" fill="#9BB6CA" font-size="13">Supporting sources, linked in your answer</text>
+  </g>
+</svg>
